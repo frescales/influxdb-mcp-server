@@ -24,7 +24,7 @@ import { createOrg } from "../src/handlers/createOrgTool.js";
 import { fluxQueryExamplesPrompt } from "../src/prompts/fluxQueryExamplesPrompt.js";
 import { lineProtocolGuidePrompt } from "../src/prompts/lineProtocolGuidePrompt.js";
 
-// Configure logger and validate environment
+// Configure logger
 configureLogger();
 
 // Create MCP server instance (singleton)
@@ -111,24 +111,27 @@ function getServer() {
 
 // Vercel serverless function handler
 export default async function handler(req, res) {
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    return res.status(200).end();
+  }
+
   // Only allow POST requests
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // Set CORS headers if needed
+  // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  // Handle OPTIONS request for CORS
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
   try {
-    // Validate environment on each request
+    // Validate environment
     validateEnvironment();
 
     // Get or create the server instance
@@ -137,10 +140,11 @@ export default async function handler(req, res) {
     // Create HTTP transport for this request
     const transport = new HttpServerTransport(req, res);
     
-    // Connect the server to the transport
+    // Connect the server to the transport and start processing
     await mcpServer.connect(transport);
+    await transport.start();
     
-    // The transport will handle the response
+    // The transport will handle sending the response
   } catch (error) {
     console.error('MCP Server Error:', error);
     
