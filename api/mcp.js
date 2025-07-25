@@ -1,4 +1,4 @@
-// Streamable HTTP implementation for Claude.ai MCP remote server
+// Standard Node.js handler for Claude.ai MCP remote server
 import { validateEnvironment } from "../src/config/env.js";
 import { configureLogger } from "../src/utils/loggerConfig.js";
 
@@ -17,64 +17,53 @@ import { lineProtocolGuidePrompt } from "../src/prompts/lineProtocolGuidePrompt.
 // Configure logger
 configureLogger();
 
-// Vercel edge function config
-export const config = {
-  runtime: 'edge',
-};
-
 // Main handler
 export default async function handler(req, res) {
   // Handle CORS
-  const headers = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-  };
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 200, headers });
+    return res.status(200).end();
   }
 
   try {
     // Validate environment
     validateEnvironment();
 
-    // Handle GET requests - SSE endpoint
+    // Handle GET requests - SSE endpoint for Claude.ai
     if (req.method === 'GET') {
-      const encoder = new TextEncoder();
-      let controller;
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
       
-      const stream = new ReadableStream({
-        start(c) {
-          controller = c;
-          
-          // Send initial message
-          const message = {
-            jsonrpc: "2.0",
-            method: "connection/ready",
-            params: {}
-          };
-          
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(message)}\n\n`));
-        },
-        cancel() {
-          // Cleanup if needed
-        }
+      // Send initial connection ready message
+      const message = {
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+        params: {}
+      };
+      
+      res.write(`data: ${JSON.stringify(message)}\n\n`);
+      
+      // Keep connection alive with periodic pings
+      const interval = setInterval(() => {
+        res.write(': ping\n\n');
+      }, 30000);
+      
+      // Clean up on client disconnect
+      req.on('close', () => {
+        clearInterval(interval);
+        res.end();
       });
-
-      return new Response(stream, {
-        headers: {
-          ...headers,
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          'Connection': 'keep-alive',
-        },
-      });
+      
+      return;
     }
 
     // Handle POST requests - JSON-RPC
     if (req.method === 'POST') {
-      const body = await req.json();
+      const body = req.body;
       const { method, params, id } = body;
 
       let result;
@@ -96,6 +85,10 @@ export default async function handler(req, res) {
               }
             };
             break;
+
+          case "initialized":
+            // Client notification, no response needed
+            return res.status(204).end();
 
           case "tools/list":
             result = {
@@ -305,33 +298,19 @@ export default async function handler(req, res) {
         response.result = result;
       }
 
-      return new Response(JSON.stringify(response), {
-        headers: {
-          ...headers,
-          'Content-Type': 'application/json',
-        },
-      });
+      return res.status(200).json(response);
     }
 
-    return new Response('Method not allowed', { 
-      status: 405,
-      headers 
-    });
+    return res.status(405).json({ error: 'Method not allowed' });
 
   } catch (error) {
     console.error('Server error:', error);
-    return new Response(JSON.stringify({
+    return res.status(500).json({
       jsonrpc: "2.0",
       error: {
         code: -32603,
         message: "Internal server error",
         data: error.message
-      }
-    }), {
-      status: 500,
-      headers: {
-        ...headers,
-        'Content-Type': 'application/json',
       }
     });
   }
