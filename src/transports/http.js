@@ -10,24 +10,44 @@ export class HttpServerTransport {
     this.req = req;
     this.res = res;
     this.responsesSent = false;
+    this._messageBuffer = [];
+    
+    // Bind methods to ensure correct 'this' context
+    this.start = this.start.bind(this);
+    this.send = this.send.bind(this);
+    this.close = this.close.bind(this);
   }
 
   async start() {
-    // Process the incoming request
-    const requestBody = this.req.body;
-    
-    if (!requestBody || typeof requestBody !== 'object') {
-      throw new Error('Invalid request body');
-    }
+    // Process the incoming request body immediately
+    try {
+      const requestBody = this.req.body;
+      
+      if (!requestBody || typeof requestBody !== 'object') {
+        throw new Error('Invalid request body');
+      }
 
-    // The request body should be a JSON-RPC message
-    if (!requestBody.jsonrpc || requestBody.jsonrpc !== '2.0') {
-      throw new Error('Invalid JSON-RPC version');
-    }
+      // The request body should be a JSON-RPC message
+      if (!requestBody.jsonrpc || requestBody.jsonrpc !== '2.0') {
+        throw new Error('Invalid JSON-RPC version');
+      }
 
-    // Emit the message to be processed by the server
-    if (this.onmessage) {
-      await this.onmessage(requestBody);
+      // Store the message for processing
+      this._messageBuffer.push(requestBody);
+      
+      // Process buffered messages
+      while (this._messageBuffer.length > 0) {
+        const message = this._messageBuffer.shift();
+        if (this.onmessage) {
+          await this.onmessage(message);
+        }
+      }
+    } catch (error) {
+      if (this.onerror) {
+        this.onerror(error);
+      } else {
+        throw error;
+      }
     }
   }
 
@@ -36,16 +56,27 @@ export class HttpServerTransport {
     if (!this.responsesSent && !this.res.headersSent) {
       this.responsesSent = true;
       
-      // For streaming responses, we could implement chunked transfer
-      // For now, we'll send complete responses
-      this.res.status(200).json(message);
+      // Ensure we have a valid JSON-RPC response
+      const response = {
+        jsonrpc: "2.0",
+        ...message
+      };
+      
+      this.res.status(200).json(response);
     }
   }
 
   async close() {
     // Ensure the response is sent if not already
     if (!this.responsesSent && !this.res.headersSent) {
-      this.res.status(200).end();
+      this.res.status(200).json({
+        jsonrpc: "2.0",
+        result: null
+      });
+    }
+    
+    if (this.onclose) {
+      this.onclose();
     }
   }
 
