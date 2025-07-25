@@ -6,7 +6,9 @@ export const DEFAULT_ORG = process.env.INFLUXDB_ORG;
 // Check required environment variables
 export function validateEnvironment() {
   if (!INFLUXDB_TOKEN) {
-    console.error("Error: INFLUXDB_TOKEN environment variable is required");
-    process.exit(1);
+    throw new Error("INFLUXDB_TOKEN environment variable is required");
+  }
+  if (!INFLUXDB_URL) {
+    throw new Error("INFLUXDB_URL environment variable is required");
   }
 }
