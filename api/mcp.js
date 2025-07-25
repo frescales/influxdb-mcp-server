@@ -1,4 +1,3 @@
-import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 // Import config
@@ -26,128 +25,17 @@ import { lineProtocolGuidePrompt } from "../src/prompts/lineProtocolGuidePrompt.
 // Configure logger
 configureLogger();
 
-// Create MCP server instance (singleton)
-let server;
-let isInitialized = false;
+// Store initialization state
+let initialized = false;
 
-function createServer() {
-  const mcpServer = new McpServer({
-    name: "InfluxDB",
-    version: "0.1.1",
-  });
-
-  // Register resources
-  mcpServer.resource("orgs", "influxdb://orgs", listOrganizations);
-  mcpServer.resource("buckets", "influxdb://buckets", listBuckets);
-  mcpServer.resource(
-    "bucket-measurements",
-    new ResourceTemplate("influxdb://bucket/{bucketName}/measurements", {
-      list: undefined,
-    }),
-    bucketMeasurements,
-  );
-  mcpServer.resource(
-    "query",
-    new ResourceTemplate("influxdb://query/{orgName}/{fluxQuery}", {
-      list: undefined,
-    }),
-    executeQuery,
-  );
-
-  // Register tools
-  mcpServer.tool(
-    "write-data",
-    {
-      org: z.string().describe("The organization name"),
-      bucket: z.string().describe("The bucket name"),
-      data: z.string().describe("Data in InfluxDB line protocol format"),
-      precision: z.enum(["ns", "us", "ms", "s"]).optional().describe(
-        "Timestamp precision (ns, us, ms, s)",
-      ),
-    },
-    writeData,
-  );
-
-  mcpServer.tool(
-    "query-data",
-    {
-      org: z.string().describe("The organization name"),
-      query: z.string().describe("Flux query string"),
-    },
-    queryData,
-  );
-
-  mcpServer.tool(
-    "create-bucket",
-    {
-      name: z.string().describe("The bucket name"),
-      orgID: z.string().describe("The organization ID"),
-      retentionPeriodSeconds: z.number().optional().describe(
-        "Retention period in seconds (optional)",
-      ),
-    },
-    createBucket,
-  );
-
-  mcpServer.tool(
-    "create-org",
-    {
-      name: z.string().describe("The organization name"),
-      description: z.string().optional().describe(
-        "Organization description (optional)",
-      ),
-    },
-    createOrg,
-  );
-
-  // Register prompts
-  mcpServer.prompt("flux-query-examples", {}, fluxQueryExamplesPrompt);
-  mcpServer.prompt("line-protocol-guide", {}, lineProtocolGuidePrompt);
-
-  return mcpServer;
-}
-
-// Handle MCP protocol over HTTP
+// Handle MCP protocol requests directly
 async function handleMcpRequest(request) {
   const { method, params, id } = request;
 
-  if (!server) {
-    server = createServer();
-  }
-
-  // Mock transport for handling the request
-  const mockTransport = {
-    responses: [],
-    send: async function(response) {
-      this.responses.push(response);
-    },
-    getResponse: function() {
-      return this.responses[0] || null;
-    }
-  };
-
-  // Connect server if not initialized
-  if (!isInitialized) {
-    await server.connect(mockTransport);
-    isInitialized = true;
-  }
-
-  // Create a promise to capture the response
-  const responsePromise = new Promise((resolve) => {
-    const originalSend = mockTransport.send;
-    mockTransport.send = async function(response) {
-      await originalSend.call(this, response);
-      resolve(response);
-    };
-  });
-
-  // Process the message
-  if (server.server && server.server.handleMessage) {
-    await server.server.handleMessage(request);
-  } else {
-    // Fallback: manually handle common methods
+  try {
     switch (method) {
       case "initialize":
+        initialized = true;
         return {
           jsonrpc: "2.0",
           id,
@@ -165,6 +53,10 @@ async function handleMcpRequest(request) {
           }
         };
       
+      case "notifications/initialized":
+        // This is a notification, no response needed
+        return null;
+
       case "tools/list":
         return {
           jsonrpc: "2.0",
@@ -246,12 +138,14 @@ async function handleMcpRequest(request) {
               {
                 uri: "influxdb://orgs",
                 name: "Organizations",
-                description: "List all organizations"
+                description: "List all organizations",
+                mimeType: "application/json"
               },
               {
                 uri: "influxdb://buckets",
-                name: "Buckets",
-                description: "List all buckets"
+                name: "Buckets", 
+                description: "List all buckets",
+                mimeType: "application/json"
               }
             ]
           }
@@ -277,11 +171,118 @@ async function handleMcpRequest(request) {
           }
         };
 
+      case "tools/call":
+        const { name, arguments: args } = params;
+        
+        // Call the appropriate tool handler
+        let result;
+        switch (name) {
+          case "write-data":
+            result = await writeData(args);
+            break;
+          case "query-data":
+            result = await queryData(args);
+            break;
+          case "create-bucket":
+            result = await createBucket(args);
+            break;
+          case "create-org":
+            result = await createOrg(args);
+            break;
+          default:
+            throw new Error(`Unknown tool: ${name}`);
+        }
+
+        return {
+          jsonrpc: "2.0",
+          id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+              }
+            ]
+          }
+        };
+
+      case "resources/read":
+        const { uri } = params;
+        
+        // Handle resource reading
+        let resourceResult;
+        if (uri === "influxdb://orgs") {
+          resourceResult = await listOrganizations();
+        } else if (uri === "influxdb://buckets") {
+          resourceResult = await listBuckets();
+        } else if (uri.startsWith("influxdb://bucket/")) {
+          const bucketName = uri.replace("influxdb://bucket/", "").replace("/measurements", "");
+          resourceResult = await bucketMeasurements({ bucketName });
+        } else if (uri.startsWith("influxdb://query/")) {
+          const parts = uri.replace("influxdb://query/", "").split("/");
+          const orgName = parts[0];
+          const fluxQuery = decodeURIComponent(parts.slice(1).join("/"));
+          resourceResult = await executeQuery({ orgName, fluxQuery });
+        } else {
+          throw new Error(`Unknown resource: ${uri}`);
+        }
+
+        return {
+          jsonrpc: "2.0",
+          id,
+          result: {
+            contents: [
+              {
+                uri,
+                mimeType: "application/json",
+                text: JSON.stringify(resourceResult, null, 2)
+              }
+            ]
+          }
+        };
+
+      case "prompts/get":
+        const { name: promptName } = params;
+        
+        let promptResult;
+        if (promptName === "flux-query-examples") {
+          promptResult = await fluxQueryExamplesPrompt();
+        } else if (promptName === "line-protocol-guide") {
+          promptResult = await lineProtocolGuidePrompt();
+        } else {
+          throw new Error(`Unknown prompt: ${promptName}`);
+        }
+
+        return {
+          jsonrpc: "2.0",
+          id,
+          result: {
+            description: promptResult.title,
+            messages: [
+              {
+                role: "assistant",
+                content: {
+                  type: "text",
+                  text: promptResult.content
+                }
+              }
+            ]
+          }
+        };
+
       default:
-        // Wait for actual response from server
-        const response = await responsePromise;
-        return response;
+        throw new Error(`Unknown method: ${method}`);
     }
+  } catch (error) {
+    return {
+      jsonrpc: "2.0",
+      id,
+      error: {
+        code: -32603,
+        message: "Internal error",
+        data: error.message
+      }
+    };
   }
 }
 
@@ -324,8 +325,12 @@ export default async function handler(req, res) {
     // Handle the MCP request
     const response = await handleMcpRequest(request);
     
-    // Send response
-    res.status(200).json(response);
+    // Send response (notifications don't get responses)
+    if (response) {
+      res.status(200).json(response);
+    } else {
+      res.status(200).end();
+    }
     
   } catch (error) {
     console.error('MCP Server Error:', error);
