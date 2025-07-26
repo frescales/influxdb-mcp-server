@@ -7,7 +7,19 @@
   "rewrites": [
     {
       "source": "/mcp",
-      "destination": "/api/mcp"
+      "destination": "/api/mcp-claude"
+    },
+    {
+      "source": "/mcp-claude",
+      "destination": "/api/mcp-claude"
+    },
+    {
+      "source": "/sse",
+      "destination": "/api/mcp-claude"
+    },
+    {
+      "source": "/messages",
+      "destination": "/api/mcp-claude"
     },
     {
       "source": "/",
@@ -29,6 +41,14 @@
         {
           "key": "Access-Control-Allow-Headers",
           "value": "*"
+        },
+        {
+          "key": "Access-Control-Allow-Credentials",
+          "value": "true"
+        },
+        {
+          "key": "MCP-Protocol-Version",
+          "value": "2024-11-05"
         }
       ]
     }
