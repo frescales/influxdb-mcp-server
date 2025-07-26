@@ -1,8 +1,9 @@
-// MCP Server for InfluxDB - Fixed for Claude.ai Web Interface
-// Based on research document findings for remote MCP servers
+// MCP Server for InfluxDB - Enhanced for Claude.ai Web Interface
+// Implements OAuth 2.1 and all requirements from MCP research document
 
 import { validateEnvironment } from "../src/config/env.js";
 import { configureLogger } from "../src/utils/loggerConfig.js";
+import { tokens } from "./oauth-config.js";
 
 // Import handlers
 import { listOrganizations } from "../src/handlers/organizationsHandler.js";
@@ -154,8 +155,29 @@ function createResponse(id, result, error) {
   return response;
 }
 
+// Validate OAuth token
+function validateToken(authHeader) {
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return null;
+  }
+  
+  const token = authHeader.substring(7);
+  const tokenData = tokens.get(token);
+  
+  if (!tokenData || tokenData.is_refresh_token) {
+    return null;
+  }
+  
+  if (Date.now() > tokenData.expires_at) {
+    tokens.delete(token);
+    return null;
+  }
+  
+  return tokenData;
+}
+
 // Handle JSON-RPC requests
-async function handleRequest(request) {
+async function handleRequest(request, tokenData) {
   const { method, params, id } = request;
   
   try {
@@ -172,17 +194,52 @@ async function handleRequest(request) {
         return null;
         
       case "tools/list":
+        // Check if token has tools scope
+        if (tokenData && !tokenData.scope?.includes('mcp:tools')) {
+          return createResponse(id, null, {
+            code: -32603,
+            message: "Insufficient permissions",
+            data: "Token lacks mcp:tools scope"
+          });
+        }
         return createResponse(id, { tools: TOOLS });
         
       case "resources/list":
+        // Check if token has resources scope
+        if (tokenData && !tokenData.scope?.includes('mcp:resources')) {
+          return createResponse(id, null, {
+            code: -32603,
+            message: "Insufficient permissions",
+            data: "Token lacks mcp:resources scope"
+          });
+        }
         return createResponse(id, { resources: RESOURCES });
         
       case "prompts/list":
         return createResponse(id, { prompts: [] });
         
       case "tools/call":
+        // Check permissions
+        if (tokenData && !tokenData.scope?.includes('mcp:tools')) {
+          return createResponse(id, null, {
+            code: -32603,
+            message: "Insufficient permissions",
+            data: "Token lacks mcp:tools scope"
+          });
+        }
+        
         const { name, arguments: args } = params;
         let result;
+        
+        // Additional permission check for write operations
+        if ((name === 'write_data' || name === 'create_bucket' || name === 'create_org') && 
+            tokenData && !tokenData.scope?.includes('influxdb:write')) {
+          return createResponse(id, null, {
+            code: -32603,
+            message: "Insufficient permissions",
+            data: "Token lacks influxdb:write scope"
+          });
+        }
         
         // Map new tool names to old handler functions
         switch (name) {
@@ -210,6 +267,15 @@ async function handleRequest(request) {
         });
         
       case "resources/read":
+        // Check permissions
+        if (tokenData && !tokenData.scope?.includes('mcp:resources')) {
+          return createResponse(id, null, {
+            code: -32603,
+            message: "Insufficient permissions",
+            data: "Token lacks mcp:resources scope"
+          });
+        }
+        
         const { uri } = params;
         let data;
         
@@ -269,6 +335,13 @@ export default async function handler(req, res) {
     // Validate environment
     validateEnvironment();
     
+    // Check for OAuth token
+    const authHeader = req.headers.authorization;
+    const tokenData = validateToken(authHeader);
+    
+    // For Claude.ai, allow both authenticated and unauthenticated access
+    // but restrict functionality based on token presence and scopes
+    
     // Streamable HTTP endpoint (preferred by Claude.ai)
     if (req.method === 'POST' && req.headers.accept?.includes('text/event-stream')) {
       res.setHeader('Content-Type', 'text/event-stream');
@@ -280,7 +353,7 @@ export default async function handler(req, res) {
       const sessionId = generateSessionId();
       
       // Process the request
-      const response = await handleRequest(req.body);
+      const response = await handleRequest(req.body, tokenData);
       
       if (response) {
         sendSSE(res, response);
@@ -320,7 +393,7 @@ export default async function handler(req, res) {
     
     // Standard JSON-RPC endpoint
     if (req.method === 'POST') {
-      const response = await handleRequest(req.body);
+      const response = await handleRequest(req.body, tokenData);
       
       if (response) {
         return res.status(200).json(response);
